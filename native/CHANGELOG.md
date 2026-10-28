@@ -6,6 +6,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## Recent Changes 
 
+- `c`: Fixed binary writes (`--encoding binary`) to PDS and PDSE members keeping only the first record. The data is now written as record-sized pieces instead of being split on newline bytes. [#1207](https://github.com/zowe/zowex/issues/1207)
 - `c`: Added additional error logging when zo fails to parse IDCAMS output while attempting to resolve a data set alias. [#1198](https://github.com/zowe/zo/pull/1198)
 - `c`: Added z/OSMF-compatible `execSystem`, `execMember`, `execSubmitted`, `execStarted`, and `execEnded` fields to job list and status JSON responses, enabling submitted-date and completed-date sorting. [#1187](https://github.com/zowe/zo/pull/1187)
 - `python`: Exposed job execution metadata and UTC timestamps through the job bindings. [#1187](https://github.com/zowe/zo/pull/1187)
