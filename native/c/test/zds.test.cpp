@@ -756,6 +756,43 @@ void zds_tests()
         Expect(out.size()).ToBe(binary_input.size());
         Expect(out == binary_input).ToBe(true);
       });
+
+      it("should keep records that exactly fill a VB block (BLKSIZE = LRECL + 4)", [&]() -> void
+      {
+        ZDS zds = {0};
+        std::string dsn = get_random_ds(3);
+        created_dsns.push_back(dsn);
+
+        DS_ATTRIBUTES vb_attr{};
+        vb_attr.dsorg = "PO";
+        vb_attr.recfm = "VB";
+        vb_attr.lrecl = 80;
+        vb_attr.blksize = 84;
+        vb_attr.alcunit = "TRACKS";
+        vb_attr.primary = 5;
+        vb_attr.secondary = 5;
+        vb_attr.dirblk = 10;
+        std::string response;
+        ExpectWithContext(zds_create_dsn(&zds, dsn, vb_attr, response), zds.diag.e_msg).ToBe(0);
+        std::string member = dsn + "(BIN)";
+
+        // 3 records of 76 bytes, each one plus its RDW exactly fills a block after the BDW
+        std::string vb_input;
+        for (int i = 0; i < 228; i++)
+        {
+          vb_input.push_back(static_cast<char>((i * 7 + 1) & 0xFF));
+        }
+
+        zds.encoding_opts.data_type = eDataTypeBinary;
+        ZDSWriteOpts wopts{.zds = &zds, .dsname = member};
+        int wrc = zds_write(wopts, vb_input);
+        ExpectWithContext(wrc, zds.diag.e_msg).ToBe(RTNCD_SUCCESS);
+
+        const std::string out = read_member_binary(member);
+        Expect(out.size()).ToBe(vb_input.size());
+        Expect(out == vb_input).ToBe(true);
+      });
+
     });
 
     describe("copy datasets", [&]() -> void
