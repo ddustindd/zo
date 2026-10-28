@@ -1255,7 +1255,7 @@ void register_commands(parser::Command &root_command)
 
   auto ds_delete_vsam_cmd = command_ptr(new Command("delete-vsam", "delete a VSAM cluster"));
   ds_delete_vsam_cmd->add_positional_arg("dsn", "VSAM cluster name", ArgType_Single, true);
-  ds_delete_vsam_cmd->add_keyword_arg("erase", make_aliases("--erase"), "Overwrite the cluster's data component with binary zeros before deletion (true|false). Defaults to the cluster's definition", ArgType_Single, false);
+  ds_delete_vsam_cmd->add_keyword_arg("erase", make_aliases("--erase"), "Overwrite the cluster's data component with binary zeros before deletion (true|false). Defaults to the cluster's definition", ArgType_Single, false, ArgValue(), true);
   ds_delete_vsam_cmd->add_keyword_arg("purge", make_aliases("--purge"), "Delete the cluster even if its retention period has not expired", ArgType_Flag, false, ArgValue(false));
   ds_delete_vsam_cmd->set_handler(handle_vsam_delete);
   data_set_cmd->add_command(ds_delete_vsam_cmd);
