@@ -22,7 +22,6 @@
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
-#include <fstream>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -44,7 +43,7 @@ private:
   static constexpr int MAX_LOG_FILES = 10;
 
   std::mutex m_log_mutex;
-  std::ofstream m_log_file;
+  FILE *m_log_file = nullptr;
   std::string m_log_file_path;
   std::atomic<int> m_level;
   std::atomic<bool> m_server_mode{false};
@@ -94,24 +93,47 @@ private:
     localtime_r(&now, &timeinfo);
     char timestamp[32];
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &timeinfo);
-    m_log_file << timestamp;
+    std::fputs(timestamp, m_log_file);
   }
 
   bool open_log_file(bool truncate)
   {
-    int fd = open(m_log_file_path.c_str(), O_WRONLY | O_CREAT | (truncate ? O_TRUNC : O_APPEND), 0600);
-    if (fd == -1)
+    struct stat previous;
+    const bool existed = lstat(m_log_file_path.c_str(), &previous) == 0;
+    if ((existed && (!S_ISREG(previous.st_mode) || previous.st_uid != geteuid() || previous.st_nlink != 1)) ||
+        (!existed && errno != ENOENT))
     {
-      std::cerr << "Failed to create log file: " << m_log_file_path << std::endl;
+      std::cerr << "Unsafe log file: " << m_log_file_path << std::endl;
       return false;
     }
-    close(fd);
 
-    m_log_file.clear();
-    m_log_file.open(m_log_file_path.c_str(), std::ios::out | std::ios::app);
-    if (!m_log_file.is_open())
+    // Open once, without truncation, and validate the descriptor before writing.
+    const int flags = O_WRONLY | O_APPEND | O_NONBLOCK | (existed ? 0 : O_CREAT | O_EXCL);
+    const int fd = open(m_log_file_path.c_str(), flags, 0600);
+    if (fd == -1)
     {
       std::cerr << "Failed to open log file: " << m_log_file_path << std::endl;
+      return false;
+    }
+    struct stat opened;
+    if (fstat(fd, &opened) != 0 || !S_ISREG(opened.st_mode) || opened.st_uid != geteuid() || opened.st_nlink != 1 ||
+        (existed && (opened.st_dev != previous.st_dev || opened.st_ino != previous.st_ino)))
+    {
+      close(fd);
+      std::cerr << "Log file changed while opening: " << m_log_file_path << std::endl;
+      return false;
+    }
+    if (truncate && ftruncate(fd, 0) != 0)
+    {
+      close(fd);
+      std::cerr << "Failed to truncate log file: " << m_log_file_path << std::endl;
+      return false;
+    }
+    m_log_file = fdopen(fd, "a");
+    if (!m_log_file)
+    {
+      close(fd);
+      std::cerr << "Failed to create log stream: " << m_log_file_path << std::endl;
       return false;
     }
     return true;
@@ -121,17 +143,25 @@ private:
   {
     m_pending_initialization = false;
     const std::string logs_dir = zlog_util::resolve_logs_dir();
-    if (!zlog_util::make_dirs(logs_dir))
+    if (!zlog_util::is_valid_logs_dir(logs_dir) || !zlog_util::make_dirs(logs_dir))
     {
       std::cerr << "Failed to create logs directory: " << logs_dir << std::endl;
       return;
     }
 
-    m_log_file_path = logs_dir + (m_server_mode ? "/zowex_server.log" : "/zowex.log");
+    char canonical_dir[PATH_MAX];
+    struct stat directory;
+    if (!realpath(logs_dir.c_str(), canonical_dir) || stat(canonical_dir, &directory) != 0 ||
+        !S_ISDIR(directory.st_mode) || directory.st_uid != geteuid() || (directory.st_mode & 0022) != 0)
+    {
+      std::cerr << "Logs directory must be owned by the current user and not writable by others" << std::endl;
+      return;
+    }
+    m_log_file_path = std::string(canonical_dir) + (m_server_mode ? "/zowex_server.log" : "/zowex.log");
     m_initialized = open_log_file(truncate);
 #if defined(ZLOG_ENABLE) && defined(__MVS__)
     // BSAM must not share a file with the C++ append stream.
-    const std::string metal_path = logs_dir + "/zowex_metal.log";
+    const std::string metal_path = std::string(canonical_dir) + "/zowex_metal.log";
     int level = m_level.load(std::memory_order_relaxed);
     m_metal_initialized = ZLGINIT(metal_path.c_str(), &level) == 0;
     if (!m_metal_initialized)
@@ -143,9 +173,10 @@ private:
 
   void close_log_file()
   {
-    if (m_log_file.is_open())
+    if (m_log_file)
     {
-      m_log_file.close();
+      std::fclose(m_log_file);
+      m_log_file = nullptr;
     }
     m_initialized = false;
 #if defined(ZLOG_ENABLE) && defined(__MVS__)
@@ -190,39 +221,34 @@ private:
   void check_and_rotate_log_file()
   {
     struct stat st;
-    if (stat(m_log_file_path.c_str(), &st) != 0 || static_cast<size_t>(st.st_size) <= MAX_LOG_FILE_SIZE)
+    if (fstat(fileno(m_log_file), &st) != 0 || static_cast<size_t>(st.st_size) <= MAX_LOG_FILE_SIZE)
     {
       return;
     }
 
-    m_log_file.close();
     if (!rotate_log_files())
     {
-      m_log_file.clear();
-      m_log_file.open(m_log_file_path.c_str(), std::ios::out | std::ios::app);
-      m_initialized = m_log_file.is_open();
-      if (!m_initialized)
-      {
-        std::cerr << "Failed to reopen log file after failed rotation: " << m_log_file_path << std::endl;
-      }
-      else if (!m_rotation_stall_warned && static_cast<size_t>(st.st_size) > 2 * MAX_LOG_FILE_SIZE)
+      if (!m_rotation_stall_warned && static_cast<size_t>(st.st_size) > 2 * MAX_LOG_FILE_SIZE)
       {
         write_timestamp();
-        m_log_file << " [WARN] Log rotation has been failing repeatedly; file size (" << st.st_size
-                   << " bytes) exceeds twice the configured limit\n";
-        m_log_file.flush();
+        std::fprintf(m_log_file, " [WARN] Log rotation has been failing repeatedly; file size (%lld"
+                                 " bytes) exceeds twice the configured limit\n",
+                     static_cast<long long>(st.st_size));
+        std::fflush(m_log_file);
         m_rotation_stall_warned = true;
       }
       return;
     }
 
+    std::fclose(m_log_file);
+    m_log_file = nullptr;
     m_rotation_stall_warned = false;
     m_initialized = open_log_file(true);
     if (m_initialized)
     {
       write_timestamp();
-      m_log_file << " [INFO] Log file rolled over due to size limit\n";
-      m_log_file.flush();
+      std::fputs(" [INFO] Log file rolled over due to size limit\n", m_log_file);
+      std::fflush(m_log_file);
     }
   }
 
@@ -248,8 +274,8 @@ private:
     }
 
     write_timestamp();
-    m_log_file << " [" << get_level_name(level) << "] " << message << '\n';
-    m_log_file.flush();
+    std::fprintf(m_log_file, " [%s] %s\n", get_level_name(level), message);
+    std::fflush(m_log_file);
     check_and_rotate_log_file();
   }
 
@@ -382,9 +408,12 @@ public:
     va_end(args);
   }
 
-  void fatal(const char *format, int exit_code)
+  void fatal(const char *message, int exit_code)
   {
-    log(ZLOGLEVEL_FATAL, format);
+    if (message)
+    {
+      log(ZLOGLEVEL_FATAL, "%s", message);
+    }
     std::exit(exit_code);
   }
 

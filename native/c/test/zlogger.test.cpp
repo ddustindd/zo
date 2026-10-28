@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -160,9 +161,7 @@ private:
   ScopedEnvironment level_env;
 };
 
-} // namespace
-
-void zlogger_tests()
+void command_routing_tests()
 {
   describe("ZLogger command logging", []() -> void
   {
@@ -228,7 +227,13 @@ void zlogger_tests()
       Expect(contents).ToContain("retained nonterminating fatal 42");
       Expect(file_exists(scope.server_path())).ToBe(false);
     });
+  });
+}
 
+void command_level_and_format_tests()
+{
+  describe("ZLogger command levels and formatting", []() -> void
+  {
     it("applies level changes to output and suppresses every severity at OFF", []()
     {
       ScopedLogger scope;
@@ -274,7 +279,13 @@ void zlogger_tests()
       Expect(static_cast<bool>(std::getline(records, extra))).ToBe(false);
       Expect(contents.back()).ToBe('\n');
     });
+  });
+}
 
+void concurrent_logging_tests()
+{
+  describe("ZLogger concurrent logging", []() -> void
+  {
     it("writes concurrent formatted messages as complete unique records", []()
     {
       ScopedLogger scope;
@@ -326,7 +337,13 @@ void zlogger_tests()
       Expect(count).ToBe(thread_count * records_per_thread);
       Expect(expected.empty()).ToBe(true);
     });
+  });
+}
 
+void logger_shutdown_tests()
+{
+  describe("ZLogger shutdown", []() -> void
+  {
     it("does not reopen after shutdown and resumes only through explicit initialization", []()
     {
       ScopedLogger scope;
@@ -358,4 +375,39 @@ void zlogger_tests()
       Expect(server).Not().ToContain("blocked");
     });
   });
+}
+
+void fatal_message_tests()
+{
+  describe("ZLogger fatal messages", []() -> void
+  {
+    it("preserves percent sequences as text and exits with the requested status", []()
+    {
+      ScopedLogger scope;
+      std::fflush(nullptr);
+      const pid_t child = fork();
+      Expect(child).ToBeGreaterThan(static_cast<pid_t>(-1));
+      if (child == 0)
+      {
+        scope.logger.fatal("literal %%s %%n 100%%", 7);
+      }
+      int status = 0;
+      Expect(waitpid(child, &status, 0)).ToBe(child);
+      Expect(WIFEXITED(status)).ToBe(true);
+      Expect(WEXITSTATUS(status)).ToBe(7);
+      scope.logger.shutdown();
+      Expect(read_file_contents(scope.command_path())).ToContain("literal %%s %%n 100%%");
+    });
+  });
+}
+
+} // namespace
+
+void zlogger_tests()
+{
+  command_routing_tests();
+  command_level_and_format_tests();
+  concurrent_logging_tests();
+  logger_shutdown_tests();
+  fatal_message_tests();
 }
